@@ -1,31 +1,5 @@
-LEVEL_THRESHOLDS = [0, 1, 5, 15, 30, 50]
-
-LEVEL_NAMES = {
-    'lt': [
-        '😶‍🌫️ Niekšas',
-        '👏 Fanas',
-        '🎛️ Prodiuseris',
-        '🛹 Mobo narys',
-        '🧠 Mobo lyderis',
-        '🎤 Reperis',
-    ],
-    'en': [
-        '😶‍🌫️ Scoundrel',
-        '👏 Fan',
-        '🎛️ Producer',
-        '🛹 Crew member',
-        '🧠 Crew leader',
-        '🎤 Rapper',
-    ],
-    'ru': [
-        '😶‍🌫️ Негодяй',
-        '👏 Фанат',
-        '🎛️ Продюсер',
-        '🛹 Участник банды',
-        '🧠 Лидер банды',
-        '🎤 Рэпер',
-    ],
-}
+from bot.constants.levels import DEFAULT_LEVEL_NAMES, DEFAULT_LEVEL_THRESHOLDS
+from bot.database.methods import get_level_settings
 
 
 def get_level_info(purchases: int, lang: str = 'lt'):
@@ -37,20 +11,31 @@ def get_level_info(purchases: int, lang: str = 'lt'):
     """
     if purchases < 0:
         purchases = 0
+    try:
+        thresholds, names_map = get_level_settings()
+    except Exception:  # pragma: no cover - fallback in case database is unavailable
+        thresholds, names_map = DEFAULT_LEVEL_THRESHOLDS, DEFAULT_LEVEL_NAMES
+    if not thresholds:
+        thresholds = list(DEFAULT_LEVEL_THRESHOLDS)
+    if not names_map:
+        names_map = DEFAULT_LEVEL_NAMES
     level_index = 0
-    for idx, threshold in enumerate(LEVEL_THRESHOLDS):
+    for idx, threshold in enumerate(thresholds):
         if purchases >= threshold:
             level_index = idx
         else:
             break
-    names = LEVEL_NAMES.get(lang, LEVEL_NAMES['lt'])
+    names = names_map.get(lang) or names_map.get('en') or next(iter(names_map.values()))
+    if level_index >= len(names):
+        level_index = len(names) - 1
     level_name = names[level_index]
     discount = 0
 
-    if level_index < len(LEVEL_THRESHOLDS) - 1:
-        next_threshold = LEVEL_THRESHOLDS[level_index + 1]
-        progress = purchases - LEVEL_THRESHOLDS[level_index]
-        needed = next_threshold - LEVEL_THRESHOLDS[level_index]
+    if level_index < len(thresholds) - 1:
+        next_threshold = thresholds[level_index + 1]
+        current_threshold = thresholds[level_index]
+        progress = purchases - current_threshold
+        needed = next_threshold - current_threshold
         battery = '🪫' if progress * 2 < needed else '🔋'
     else:
         battery = '🔋'
