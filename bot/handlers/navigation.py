@@ -9,6 +9,14 @@ from bot.utils import restore_previous_message
 
 async def navigation_back_handler(call: CallbackQuery) -> None:
     fallback = call.data[len('navback:'):] if call.data else ''
+    if fallback:
+        TgConfig.STATE[call.from_user.id] = None
+        TgConfig.STATE.pop(f'{call.from_user.id}_emoji_source', None)
+        await call.answer()
+        dispatcher = Dispatcher.get_current()
+        call.data = fallback
+        await dispatcher.callback_query_handlers.notify(call)
+        return
     if call.message:
         restored = await restore_previous_message(
             call.bot,
@@ -21,11 +29,6 @@ async def navigation_back_handler(call: CallbackQuery) -> None:
             await call.answer()
             return
     await call.answer()
-    if not fallback:
-        return
-    dispatcher = Dispatcher.get_current()
-    call.data = fallback
-    await dispatcher.callback_query_handlers.notify(call)
 
 
 def register_navigation(dp: Dispatcher) -> None:

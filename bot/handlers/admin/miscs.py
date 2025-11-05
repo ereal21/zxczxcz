@@ -1,5 +1,6 @@
 from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, Message
+import contextlib
 import random
 
 from bot.database.methods import (
@@ -8,11 +9,20 @@ from bot.database.methods import (
     reset_lottery_tickets,
     get_all_users,
     get_user_language,
+    get_profile_settings,
+    toggle_profile_feature,
+    set_blackjack_max_bet,
+    set_profile_text,
 )
 from bot.database.models import Permission
 from bot.handlers.other import get_bot_user_ids
 from bot.keyboards import (
     tools_menu,
+    tools_games_menu,
+    tools_profile_menu,
+    tools_team_menu,
+    tools_sales_menu,
+    tools_broadcast_menu,
     lottery_menu,
     lottery_run_menu,
     lottery_broadcast_menu,
@@ -21,6 +31,103 @@ from bot.keyboards import (
 from bot.misc import TgConfig
 from bot.localization import t
 from bot.utils import safe_edit_message_text
+
+
+_TOOLS_TEXTS = {
+    'en': {
+        'main': '🛠️ <b>Administrator tools</b>\nChoose a category to continue.',
+        'games': '🎮 <b>Game utilities</b>\nManage entertainment modules for your users.',
+        'profile': '👤 <b>Profile controls</b>\nToggle and fine-tune user profile features.',
+        'team': '🤝 <b>Team management</b>\nAssign trusted owners and assistants.',
+        'sales': '🏷️ <b>Sales toolkit</b>\nControl reseller access and promo codes.',
+        'broadcast': '📣 <b>Communication</b>\nSend targeted announcements to your audience.',
+    },
+    'lt': {
+        'main': '🛠️ <b>Įrankių meniu</b>\nPasirinkite dominančią kategoriją.',
+        'games': '🎮 <b>Žaidimų valdymas</b>\nTvarkykite pramogų modulius savo vartotojams.',
+        'profile': '👤 <b>Profilio valdymas</b>\nĮjunkite ar išjunkite profilio funkcijas bei jas derinkite.',
+        'team': '🤝 <b>Komandos valdymas</b>\nPriskirkite savininkus ir asistentus.',
+        'sales': '🏷️ <b>Pardavimo įrankiai</b>\nValdykite resellerius ir nuolaidų kodus.',
+        'broadcast': '📣 <b>Komunikacija</b>\nSiųskite žinutes savo auditorijai.',
+    },
+    'ru': {
+        'main': '🛠️ <b>Панель инструментов</b>\nВыберите нужную категорию.',
+        'games': '🎮 <b>Игровые модули</b>\nУправляйте развлечениями для пользователей.',
+        'profile': '👤 <b>Управление профилем</b>\nВключайте, отключайте и настраивайте функции профиля.',
+        'team': '🤝 <b>Команда</b>\nНазначайте владельцев и ассистентов.',
+        'sales': '🏷️ <b>Инструменты продаж</b>\nКонтролируйте реселлеров и промокоды.',
+        'broadcast': '📣 <b>Коммуникации</b>\nРассылайте сообщения своей аудитории.',
+    },
+}
+
+_PROFILE_STATUS = {
+    'en': {True: 'Enabled', False: 'Disabled'},
+    'lt': {True: 'Įjungta', False: 'Išjungta'},
+    'ru': {True: 'Вкл.', False: 'Выкл.'},
+}
+
+_PROFILE_LINES = {
+    'en': {
+        'title': '👤 <b>Profile controls</b>',
+        'profile': 'Profile menu: <b>{status}</b>',
+        'blackjack': 'Blackjack: <b>{status}</b> (max {max_bet}€)',
+        'quests': 'Quests: <b>{status}</b>',
+        'missions': 'Missions: <b>{status}</b>',
+        'quests_desc': '🧩 Quests text: {text}',
+        'missions_desc': '🎯 Missions text: {text}',
+    },
+    'lt': {
+        'title': '👤 <b>Profilio funkcijos</b>',
+        'profile': 'Profilio meniu: <b>{status}</b>',
+        'blackjack': 'Blackjack: <b>{status}</b> (maks. {max_bet}€)',
+        'quests': 'Uždaviniai: <b>{status}</b>',
+        'missions': 'Misijos: <b>{status}</b>',
+        'quests_desc': '🧩 Uždavinių tekstas: {text}',
+        'missions_desc': '🎯 Misijų tekstas: {text}',
+    },
+    'ru': {
+        'title': '👤 <b>Настройки профиля</b>',
+        'profile': 'Меню профиля: <b>{status}</b>',
+        'blackjack': 'Blackjack: <b>{status}</b> (макс. {max_bet}€)',
+        'quests': 'Задания: <b>{status}</b>',
+        'missions': 'Миссии: <b>{status}</b>',
+        'quests_desc': '🧩 Текст заданий: {text}',
+        'missions_desc': '🎯 Текст миссий: {text}',
+    },
+}
+
+
+def _tools_text(lang: str, key: str) -> str:
+    translations = _TOOLS_TEXTS.get(lang, _TOOLS_TEXTS['en'])
+    if key in translations:
+        return translations[key]
+    return _TOOLS_TEXTS['en'][key]
+
+
+def _profile_overview_text(lang: str, settings: dict) -> str:
+    status_words = _PROFILE_STATUS.get(lang, _PROFILE_STATUS['en'])
+    lines_conf = _PROFILE_LINES.get(lang, _PROFILE_LINES['en'])
+    lines = [lines_conf['title'], '']
+    lines.append(lines_conf['profile'].format(status=status_words[settings.get('profile_enabled', True)]))
+    lines.append(
+        lines_conf['blackjack'].format(
+            status=status_words[settings.get('blackjack_enabled', True)],
+            max_bet=settings.get('blackjack_max_bet', 5),
+        )
+    )
+    lines.append(lines_conf['quests'].format(status=status_words[settings.get('quests_enabled', True)]))
+    lines.append(lines_conf['missions'].format(status=status_words[settings.get('missions_enabled', False)]))
+    quests_desc = settings.get('quests_description')
+    missions_desc = settings.get('missions_description')
+    if quests_desc:
+        lines.extend(['', lines_conf['quests_desc'].format(text=quests_desc)])
+    if missions_desc:
+        lines.extend(['', lines_conf['missions_desc'].format(text=missions_desc)])
+    return '\n'.join(lines)
+
+
+def _can_manage_profile(role: int) -> bool:
+    return bool(role & (Permission.SETTINGS_MANAGE | Permission.OWN))
 
 
 def _pick_winner():
@@ -43,63 +150,215 @@ async def miscs_callback_handler(call: CallbackQuery):
     role = check_role(user_id)
     lang = get_user_language(user_id) or 'en'
     if role != Permission.USE:
-        await safe_edit_message_text(bot, 
-            t(lang, 'tools'),
+        await safe_edit_message_text(bot,
+            _tools_text(lang, 'main'),
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
             reply_markup=tools_menu(role),
+            parse_mode='HTML',
         )
         return
     await call.answer(t(lang, 'insufficient_rights'))
 
 
-FEATURES_DISABLED = {
-    'lt': '⛔️ <b>Karališkos funkcijos sustabdytos.</b>\nKai būsite pasiruošę, galite jas atgaivinti žemiau.',
-    'en': '⛔️ <b>Royal functions have been paused.</b>\nEnable them again whenever you are ready.',
-    'ru': '⛔️ <b>Королевские функции приостановлены.</b>\nВключите их снова, когда будете готовы.',
-}
+async def tools_games_handler(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = get_user_language(user_id) or 'en'
+    await safe_edit_message_text(bot,
+        _tools_text(lang, 'games'),
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=tools_games_menu(role),
+        parse_mode='HTML',
+    )
 
-FEATURES_ENABLED = {
-    'lt': '✅ <b>Visos funkcijos vėl aktyvios.</b>\nValdymas grįžo į karališkas vėžes!',
-    'en': '✅ <b>All functions are active again.</b>\nThe royal machinery is back in motion!',
-    'ru': '✅ <b>Все функции снова активны.</b>\nКоролевские механизмы вновь работают!',
-}
+
+async def _render_profile_menu(bot, chat_id: int, message_id: int, lang: str, settings: dict | None = None):
+    profile_settings = settings or get_profile_settings()
+    await safe_edit_message_text(
+        bot,
+        _profile_overview_text(lang, profile_settings),
+        chat_id=chat_id,
+        message_id=message_id,
+        reply_markup=tools_profile_menu(profile_settings),
+        parse_mode='HTML',
+    )
 
 
-async def disable_functions_handler(call: CallbackQuery):
+async def tools_profile_handler(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = get_user_language(user_id) or 'en'
+    if not _can_manage_profile(role):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    settings = get_profile_settings()
+    await _render_profile_menu(
+        bot,
+        call.message.chat.id,
+        call.message.message_id,
+        lang,
+        settings,
+    )
+
+
+async def tools_team_handler(call: CallbackQuery):
     bot, user_id = await get_bot_user_ids(call)
     role = check_role(user_id)
     lang = get_user_language(user_id) or 'en'
     if not (role & Permission.OWN):
         await call.answer(t(lang, 'insufficient_rights'))
         return
-    TgConfig.STATE['features_disabled'] = True
-    message = FEATURES_DISABLED.get(lang, FEATURES_DISABLED['en'])
-    await safe_edit_message_text(bot, 
-        message,
+    await safe_edit_message_text(bot,
+        _tools_text(lang, 'team'),
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        reply_markup=tools_menu(role),
+        reply_markup=tools_team_menu(role),
         parse_mode='HTML',
     )
 
 
-async def enable_functions_handler(call: CallbackQuery):
+async def tools_sales_handler(call: CallbackQuery):
     bot, user_id = await get_bot_user_ids(call)
     role = check_role(user_id)
     lang = get_user_language(user_id) or 'en'
-    if not (role & Permission.OWN):
+    if not (role & Permission.SHOP_MANAGE):
         await call.answer(t(lang, 'insufficient_rights'))
         return
-    TgConfig.STATE['features_disabled'] = False
-    message = FEATURES_ENABLED.get(lang, FEATURES_ENABLED['en'])
-    await safe_edit_message_text(bot, 
-        message,
+    await safe_edit_message_text(bot,
+        _tools_text(lang, 'sales'),
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        reply_markup=tools_menu(role),
+        reply_markup=tools_sales_menu(role),
         parse_mode='HTML',
     )
+
+
+async def tools_broadcast_handler(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = get_user_language(user_id) or 'en'
+    if not (role & Permission.BROADCAST):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    await safe_edit_message_text(bot,
+        _tools_text(lang, 'broadcast'),
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=tools_broadcast_menu(role),
+        parse_mode='HTML',
+    )
+
+
+async def profile_toggle_handler(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = get_user_language(user_id) or 'en'
+    if not _can_manage_profile(role):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    feature = call.data.split(':', 1)[1]
+    current = get_profile_settings()
+    try:
+        updated = toggle_profile_feature(feature, not current.get(feature, False))
+    except ValueError:
+        await call.answer('Unsupported feature', show_alert=True)
+        return
+    await call.answer(t(lang, 'settings_saved'))
+    await _render_profile_menu(
+        bot,
+        call.message.chat.id,
+        call.message.message_id,
+        lang,
+        updated,
+    )
+
+
+async def profile_blackjack_max_bet_prompt(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = get_user_language(user_id) or 'en'
+    if not _can_manage_profile(role):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    settings = get_profile_settings()
+    TgConfig.STATE[user_id] = 'profile_settings:blackjack_max_bet'
+    TgConfig.STATE[f'{user_id}_profile_message'] = call.message.message_id
+    TgConfig.STATE[f'{user_id}_profile_chat'] = call.message.chat.id
+    prompt = await call.message.answer(t(lang, 'enter_blackjack_max_bet', current=settings.get('blackjack_max_bet', 5)))
+    TgConfig.STATE[f'{user_id}_profile_prompt'] = prompt.message_id
+
+
+async def profile_edit_quests_prompt(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = get_user_language(user_id) or 'en'
+    if not _can_manage_profile(role):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    settings = get_profile_settings()
+    TgConfig.STATE[user_id] = 'profile_settings:quests_description'
+    TgConfig.STATE[f'{user_id}_profile_message'] = call.message.message_id
+    TgConfig.STATE[f'{user_id}_profile_chat'] = call.message.chat.id
+    placeholder = settings.get('quests_description') or t(lang, 'no_text_configured')
+    prompt = await call.message.answer(t(lang, 'enter_quests_description', current=placeholder))
+    TgConfig.STATE[f'{user_id}_profile_prompt'] = prompt.message_id
+
+
+async def profile_edit_missions_prompt(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = get_user_language(user_id) or 'en'
+    if not _can_manage_profile(role):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    settings = get_profile_settings()
+    TgConfig.STATE[user_id] = 'profile_settings:missions_description'
+    TgConfig.STATE[f'{user_id}_profile_message'] = call.message.message_id
+    TgConfig.STATE[f'{user_id}_profile_chat'] = call.message.chat.id
+    placeholder = settings.get('missions_description') or t(lang, 'no_text_configured')
+    prompt = await call.message.answer(t(lang, 'enter_missions_description', current=placeholder))
+    TgConfig.STATE[f'{user_id}_profile_prompt'] = prompt.message_id
+
+
+async def profile_settings_receive_input(message: Message):
+    bot, user_id = await get_bot_user_ids(message)
+    state = TgConfig.STATE.get(user_id)
+    if not state or not str(state).startswith('profile_settings:'):
+        return
+    _, key = str(state).split(':', 1)
+    lang = get_user_language(user_id) or 'en'
+    chat_id = TgConfig.STATE.pop(f'{user_id}_profile_chat', message.chat.id)
+    msg_id = TgConfig.STATE.pop(f'{user_id}_profile_message', None)
+    prompt_id = TgConfig.STATE.pop(f'{user_id}_profile_prompt', None)
+    text = message.text.strip() if message.text else ''
+    try:
+        if key == 'blackjack_max_bet':
+            value = int(text)
+            settings = set_blackjack_max_bet(value)
+        elif key == 'quests_description':
+            settings = set_profile_text('quests_description', text)
+        elif key == 'missions_description':
+            settings = set_profile_text('missions_description', text)
+        else:
+            await message.answer('Unsupported setting')
+            TgConfig.STATE[user_id] = None
+            return
+    except ValueError:
+        if key == 'blackjack_max_bet':
+            await message.answer(t(lang, 'invalid_number'))
+        else:
+            await message.answer(t(lang, 'invalid_text'))
+        return
+    TgConfig.STATE[user_id] = None
+    with contextlib.suppress(Exception):
+        await message.delete()
+    if prompt_id:
+        with contextlib.suppress(Exception):
+            await bot.delete_message(chat_id, prompt_id)
+    if msg_id is not None:
+        await _render_profile_menu(bot, chat_id, msg_id, lang, settings)
 
 
 async def lottery_callback_handler(call: CallbackQuery):
@@ -237,8 +496,24 @@ async def lottery_broadcast_message(message: Message):
 
 def register_miscs(dp: Dispatcher) -> None:
     dp.register_callback_query_handler(miscs_callback_handler, lambda c: c.data == 'miscs', state='*')
-    dp.register_callback_query_handler(disable_functions_handler, lambda c: c.data == 'functions_disable', state='*')
-    dp.register_callback_query_handler(enable_functions_handler, lambda c: c.data == 'functions_enable', state='*')
+    dp.register_callback_query_handler(tools_games_handler, lambda c: c.data == 'tools_cat_games', state='*')
+    dp.register_callback_query_handler(
+        tools_profile_handler,
+        lambda c: c.data in ('tools_cat_profile', 'profile_blackjack_settings'),
+        state='*',
+    )
+    dp.register_callback_query_handler(tools_team_handler, lambda c: c.data == 'tools_cat_team', state='*')
+    dp.register_callback_query_handler(tools_sales_handler, lambda c: c.data == 'tools_cat_sales', state='*')
+    dp.register_callback_query_handler(tools_broadcast_handler, lambda c: c.data == 'tools_cat_broadcast', state='*')
+    dp.register_callback_query_handler(profile_toggle_handler, lambda c: c.data.startswith('profile_toggle:'), state='*')
+    dp.register_callback_query_handler(profile_blackjack_max_bet_prompt, lambda c: c.data == 'profile_blackjack_max_bet', state='*')
+    dp.register_callback_query_handler(profile_edit_quests_prompt, lambda c: c.data == 'profile_edit_quests', state='*')
+    dp.register_callback_query_handler(profile_edit_missions_prompt, lambda c: c.data == 'profile_edit_missions', state='*')
+    dp.register_message_handler(
+        profile_settings_receive_input,
+        lambda m: str(TgConfig.STATE.get(m.from_user.id, '')).startswith('profile_settings:'),
+        state='*',
+    )
     dp.register_callback_query_handler(lottery_callback_handler, lambda c: c.data == 'lottery', state='*')
     dp.register_callback_query_handler(view_tickets_handler, lambda c: c.data == 'view_tickets', state='*')
     dp.register_callback_query_handler(run_lottery_handler, lambda c: c.data == 'run_lottery', state='*')
