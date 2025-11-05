@@ -627,6 +627,7 @@ def catalog_editor_menu(lang: str = 'en') -> InlineKeyboardMarkup:
         [InlineKeyboardButton('📝 Teksto redagavimas', callback_data='catalog_edit_main')],
         [InlineKeyboardButton('🔘 Mygtukų redagavimas', callback_data='catalog_edit_buttons')],
         [InlineKeyboardButton('✨ Emodžių redagavimas', callback_data='catalog_edit_emojis')],
+        [InlineKeyboardButton(t(lang, 'catalog_levels_button'), callback_data='catalog_edit_levels')],
         [InlineKeyboardButton(t(lang, 'back'), callback_data=_navback('catalog_editor'))],
     ]
     return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
