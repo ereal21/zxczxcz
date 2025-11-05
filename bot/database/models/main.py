@@ -16,6 +16,7 @@ from sqlalchemy import (
 )
 from bot.constants.main_menu import DEFAULT_MAIN_MENU_BUTTONS, DEFAULT_MAIN_MENU_TEXTS
 from bot.constants.levels import DEFAULT_LEVEL_NAMES, DEFAULT_LEVEL_THRESHOLDS
+from bot.constants.profile import DEFAULT_PROFILE_SETTINGS
 from bot.database.main import Database
 from sqlalchemy.orm import relationship
 
@@ -425,6 +426,28 @@ class LevelSettings(Database.BASE):
         self.names = json.dumps(base_names, ensure_ascii=False)
 
 
+class ProfileSettings(Database.BASE):
+    __tablename__ = 'profile_settings'
+
+    id = Column(Integer, primary_key=True)
+    options = Column(Text, nullable=False)
+
+    def __init__(self, options: dict | None = None):
+        base_options = DEFAULT_PROFILE_SETTINGS.copy()
+        if options:
+            base_options.update(options)
+        self.options = json.dumps(base_options, ensure_ascii=False)
+
+    def as_dict(self) -> dict:
+        try:
+            stored = json.loads(self.options) if self.options else {}
+        except (TypeError, ValueError):
+            stored = {}
+        merged = DEFAULT_PROFILE_SETTINGS.copy()
+        merged.update(stored)
+        return merged
+
+
 def register_models():
     engine = Database().engine
     inspector = inspect(engine)
@@ -477,6 +500,7 @@ def register_models():
     Database.BASE.metadata.create_all(engine)
     _ensure_main_menu_defaults()
     _ensure_level_settings()
+    _ensure_profile_settings()
     Role.insert_roles()
 
 
@@ -521,4 +545,11 @@ def _ensure_level_settings() -> None:
     session = Database().session
     if session.query(LevelSettings).first() is None:
         session.add(LevelSettings())
+        session.commit()
+
+
+def _ensure_profile_settings() -> None:
+    session = Database().session
+    if session.query(ProfileSettings).first() is None:
+        session.add(ProfileSettings())
         session.commit()
