@@ -15,6 +15,7 @@ __all__ = [
     'get_level_settings',
     'set_level_thresholds',
     'set_level_names',
+    'set_level_rewards',
     'reset_level_settings',
     'get_user_level_stats',
 ]
@@ -124,8 +125,34 @@ def _load_names(raw: str | None, length: int) -> dict[str, list[str]]:
     return _sanitize_names(names_map, length)
 
 
-def get_level_settings() -> tuple[list[int], dict[str, list[str]]]:
-    """Return current level thresholds and localized names."""
+def _load_rewards(raw: str | None, length: int) -> list[int]:
+    if not raw:
+        return [0 for _ in range(length)]
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        data = []
+    if not isinstance(data, list):
+        data = []
+    rewards: list[int] = []
+    for index in range(length):
+        value = 0
+        if index < len(data):
+            try:
+                number = int(data[index])
+            except (TypeError, ValueError):
+                number = 0
+            if number < 0:
+                number = 0
+            if number > 100:
+                number = 100
+            value = number
+        rewards.append(value)
+    return rewards
+
+
+def get_level_settings() -> tuple[list[int], dict[str, list[str]], list[int]]:
+    """Return current level thresholds, localized names, and rewards."""
     entry = _ensure_entry()
     session = Database().session
     try:
@@ -142,14 +169,16 @@ def get_level_settings() -> tuple[list[int], dict[str, list[str]]]:
     if not isinstance(raw_names, dict):
         raw_names = {}
     names = _sanitize_names(raw_names, len(thresholds))
+    rewards = _load_rewards(entry.rewards, len(thresholds))
     changed = raw_thresholds != thresholds or raw_names != names
-    if changed:
+    if changed or _load_rewards(entry.rewards, len(raw_thresholds)) != rewards:
         entry.thresholds = json.dumps(thresholds)
         entry.names = json.dumps(names, ensure_ascii=False)
+        entry.rewards = json.dumps(rewards)
         session.commit()
     if changed:
         session.expire(entry)
-    return thresholds, names
+    return thresholds, names, rewards
 
 
 def set_level_thresholds(thresholds: Sequence[int]) -> list[int]:
@@ -158,8 +187,10 @@ def set_level_thresholds(thresholds: Sequence[int]) -> list[int]:
     entry = _ensure_entry()
     session = Database().session
     names = _load_names(entry.names, len(cleaned))
+    rewards = _load_rewards(entry.rewards, len(cleaned))
     entry.thresholds = json.dumps(cleaned)
     entry.names = json.dumps(names, ensure_ascii=False)
+    entry.rewards = json.dumps(rewards)
     session.commit()
     return cleaned
 
@@ -182,16 +213,42 @@ def set_level_names(language: str, names: Sequence[str]) -> list[str]:
     return sanitized
 
 
-def reset_level_settings() -> tuple[list[int], dict[str, list[str]]]:
+def set_level_rewards(rewards: Sequence[int]) -> list[int]:
+    """Update the reward percentages per level."""
+    entry = _ensure_entry()
+    session = Database().session
+    thresholds = _load_thresholds(entry.thresholds)
+    cleaned: list[int] = []
+    for index in range(len(thresholds)):
+        value = 0
+        if index < len(rewards):
+            try:
+                number = int(rewards[index])
+            except (TypeError, ValueError):
+                number = 0
+            if number < 0:
+                number = 0
+            if number > 100:
+                number = 100
+            value = number
+        cleaned.append(value)
+    entry.rewards = json.dumps(cleaned)
+    session.commit()
+    return cleaned
+
+
+def reset_level_settings() -> tuple[list[int], dict[str, list[str]], list[int]]:
     """Restore level settings to the defaults."""
     entry = _ensure_entry()
     session = Database().session
     thresholds = list(DEFAULT_LEVEL_THRESHOLDS)
     names = _sanitize_names(DEFAULT_LEVEL_NAMES, len(thresholds))
+    rewards = [0 for _ in thresholds]
     entry.thresholds = json.dumps(thresholds)
     entry.names = json.dumps(names, ensure_ascii=False)
+    entry.rewards = json.dumps(rewards)
     session.commit()
-    return thresholds, names
+    return thresholds, names, rewards
 
 
 def get_user_level_stats(offset: int = 0, limit: int = 10) -> list[dict]:

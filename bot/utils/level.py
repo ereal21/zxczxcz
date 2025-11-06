@@ -12,13 +12,16 @@ def get_level_info(purchases: int, lang: str = 'lt'):
     if purchases < 0:
         purchases = 0
     try:
-        thresholds, names_map = get_level_settings()
+        thresholds, names_map, rewards = get_level_settings()
     except Exception:  # pragma: no cover - fallback in case database is unavailable
         thresholds, names_map = DEFAULT_LEVEL_THRESHOLDS, DEFAULT_LEVEL_NAMES
+        rewards = [0 for _ in thresholds]
     if not thresholds:
         thresholds = list(DEFAULT_LEVEL_THRESHOLDS)
     if not names_map:
         names_map = DEFAULT_LEVEL_NAMES
+    if not rewards or len(rewards) < len(thresholds):
+        rewards = [0 for _ in thresholds]
     level_index = 0
     for idx, threshold in enumerate(thresholds):
         if purchases >= threshold:
@@ -29,7 +32,7 @@ def get_level_info(purchases: int, lang: str = 'lt'):
     if level_index >= len(names):
         level_index = len(names) - 1
     level_name = names[level_index]
-    discount = 0
+    discount = rewards[level_index] if level_index < len(rewards) else 0
 
     if level_index < len(thresholds) - 1:
         next_threshold = thresholds[level_index + 1]

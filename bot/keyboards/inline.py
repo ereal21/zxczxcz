@@ -534,6 +534,9 @@ def tools_menu(role: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton('🎮 Žaidimai', callback_data='tools_cat_games'),
         InlineKeyboardButton('👤 Profilis', callback_data='tools_cat_profile'),
     )
+    markup.row(
+        InlineKeyboardButton('🚀 Progresas', callback_data='tools_cat_progress'),
+    )
     management_row: list[InlineKeyboardButton] = []
     if role & (Permission.OWN | Permission.ADMINS_MANAGE):
         management_row.append(InlineKeyboardButton('🤝 Komanda', callback_data='tools_cat_team'))
@@ -555,6 +558,20 @@ def tools_games_menu(role: int) -> InlineKeyboardMarkup:
     markup.add(InlineKeyboardButton('🎰 Loterija', callback_data='lottery'))
     if role & (Permission.OWN | Permission.SETTINGS_MANAGE):
         markup.add(InlineKeyboardButton('🃏 Blackjack nustatymai', callback_data='profile_blackjack_settings'))
+    markup.add(InlineKeyboardButton('🔙 Grįžti atgal', callback_data=_navback('miscs')))
+    return markup
+
+
+def tools_progress_menu() -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.row(
+        InlineKeyboardButton('🏆 Lygiai', callback_data='catalog_edit_levels'),
+        InlineKeyboardButton('🧩 Savaitės užduotis', callback_data='tools_progress_quest'),
+    )
+    markup.row(
+        InlineKeyboardButton('🏅 Pasiekimai', callback_data='tools_progress_achievements'),
+        InlineKeyboardButton('🏷️ Terminai', callback_data='tools_progress_terms'),
+    )
     markup.add(InlineKeyboardButton('🔙 Grįžti atgal', callback_data=_navback('miscs')))
     return markup
 

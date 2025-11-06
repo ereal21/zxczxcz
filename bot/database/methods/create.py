@@ -46,11 +46,11 @@ def create_user(telegram_id: int, registration_date, referral_id, role: int = 1,
 
 
 def create_item(item_name: str, item_description: str, item_price: int, category_name: str,
-                delivery_description: str | None = None) -> None:
+                delivery_description: str | None = None, term_code: str | None = None) -> None:
     session = Database().session
     session.add(
         Goods(name=item_name, description=item_description, price=item_price,
-              category_name=category_name, delivery_description=delivery_description))
+              category_name=category_name, delivery_description=delivery_description, term_code=term_code))
     session.commit()
 
 
@@ -100,12 +100,12 @@ def start_operation(user_id: int, value: int, operation_id: str, message_id: int
 
 
 def add_bought_item(item_name: str, value: str, price: int, buyer_id: int,
-                    bought_time: str) -> int:
+                    bought_time: str, term_code: str | None = None) -> int:
     session = Database().session
     unique_id = random.randint(1000000000, 9999999999)
     session.add(
         BoughtGoods(name=item_name, value=value, price=price, buyer_id=buyer_id, bought_datetime=bought_time,
-                    unique_id=str(unique_id)))
+                    unique_id=str(unique_id), term_code=term_code))
     session.commit()
     return unique_id
 

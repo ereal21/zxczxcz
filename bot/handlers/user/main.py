@@ -1883,7 +1883,9 @@ async def _complete_cart_checkout(
         sale_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
 
         new_balance = buy_item_for_balance(user_id, price_float)
-        add_bought_item(value_data['item_name'], value_data['value'], price_float, user_id, sale_time)
+        item_info = get_item_info(value_data['item_name'], user_id)
+        term_code = item_info.get('term_code') if item_info else None
+        add_bought_item(value_data['item_name'], value_data['value'], price_float, user_id, sale_time, term_code)
 
         if referral_id and TgConfig.REFERRAL_PERCENT and can_get_referral_reward(value_data['item_name']):
             reward = round(price_float * TgConfig.REFERRAL_PERCENT / 100, 2)
@@ -1901,7 +1903,7 @@ async def _complete_cart_checkout(
         if level_after != level_before:
             await bot.send_message(user_id, t(lang, 'level_up', level=level_after))
 
-        item_info = get_item_info(value_data['item_name'], user_id)
+        item_info = item_info or get_item_info(value_data['item_name'], user_id)
         parent_cat = get_category_parent(item_info['category_name']) if item_info else None
 
         photo_desc = ''
@@ -2191,11 +2193,33 @@ async def buy_item_callback_handler(call: CallbackQuery):
             current_time = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
             formatted_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
             new_balance = buy_item_for_balance(user_id, item_price)
+            term_code = (item_info_list or {}).get('term_code') if item_info_list else None
             if gift_to:
-                add_bought_item(value_data['item_name'], value_data['value'], item_price, gift_to, formatted_time)
-                add_bought_item(value_data['item_name'], f'Gifted to @{gift_name}', item_price, user_id, formatted_time)
+                add_bought_item(
+                    value_data['item_name'],
+                    value_data['value'],
+                    item_price,
+                    gift_to,
+                    formatted_time,
+                    term_code,
+                )
+                add_bought_item(
+                    value_data['item_name'],
+                    f'Gifted to @{gift_name}',
+                    item_price,
+                    user_id,
+                    formatted_time,
+                    term_code,
+                )
             else:
-                add_bought_item(value_data['item_name'], value_data['value'], item_price, user_id, formatted_time)
+                add_bought_item(
+                    value_data['item_name'],
+                    value_data['value'],
+                    item_price,
+                    user_id,
+                    formatted_time,
+                    term_code,
+                )
 
             referral_id = get_user_referral(user_id)
             if referral_id and TgConfig.REFERRAL_PERCENT and can_get_referral_reward(value_data['item_name']):
@@ -3017,11 +3041,33 @@ async def _complete_invoice_item_purchase(
 
     username = actor_username
     new_balance = buy_item_for_balance(user_id, price)
+    term_code = (item_info_list or {}).get('term_code') if item_info_list else None
     if gift_to:
-        add_bought_item(value_data['item_name'], value_data['value'], price, gift_to, formatted_time)
-        add_bought_item(value_data['item_name'], f'Gifted to @{gift_name}', price, user_id, formatted_time)
+        add_bought_item(
+            value_data['item_name'],
+            value_data['value'],
+            price,
+            gift_to,
+            formatted_time,
+            term_code,
+        )
+        add_bought_item(
+            value_data['item_name'],
+            f'Gifted to @{gift_name}',
+            price,
+            user_id,
+            formatted_time,
+            term_code,
+        )
     else:
-        add_bought_item(value_data['item_name'], value_data['value'], price, user_id, formatted_time)
+        add_bought_item(
+            value_data['item_name'],
+            value_data['value'],
+            price,
+            user_id,
+            formatted_time,
+            term_code,
+        )
 
     purchases = select_user_items(user_id)
     photo_desc = ''

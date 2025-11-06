@@ -17,6 +17,13 @@ from sqlalchemy import (
 from bot.constants.main_menu import DEFAULT_MAIN_MENU_BUTTONS, DEFAULT_MAIN_MENU_TEXTS
 from bot.constants.levels import DEFAULT_LEVEL_NAMES, DEFAULT_LEVEL_THRESHOLDS
 from bot.constants.profile import DEFAULT_PROFILE_SETTINGS
+from bot.constants.quests import (
+    DEFAULT_QUEST_TITLES,
+    DEFAULT_QUEST_RESET,
+    DEFAULT_QUEST_TASKS,
+    DEFAULT_QUEST_REWARD,
+)
+from bot.constants.achievements import DEFAULT_ACHIEVEMENTS
 from bot.database.main import Database
 from sqlalchemy.orm import relationship
 
@@ -150,6 +157,27 @@ class Categories(Database.BASE):
         self.requires_password = requires_password
 
 
+class Term(Database.BASE):
+    __tablename__ = 'terms'
+
+    code = Column(String(64), primary_key=True, unique=True)
+    labels = Column(Text, nullable=False)
+    created_at = Column(VARCHAR, nullable=False)
+
+    def __init__(self, code: str, labels: dict[str, str] | None = None, created_at: str | None = None):
+        self.code = code
+        self.labels = json.dumps(labels or {}, ensure_ascii=False)
+        timestamp = created_at or datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        self.created_at = timestamp
+
+    def labels_dict(self) -> dict[str, str]:
+        try:
+            data = json.loads(self.labels) if self.labels else {}
+        except (TypeError, ValueError):
+            data = {}
+        return data
+
+
 class Goods(Database.BASE):
     __tablename__ = 'goods'
     name = Column(String(100), nullable=False, unique=True, primary_key=True)
@@ -157,16 +185,19 @@ class Goods(Database.BASE):
     description = Column(Text, nullable=False)
     delivery_description = Column(Text, nullable=True)
     category_name = Column(String(100), ForeignKey('categories.name'), nullable=False)
+    term_code = Column(String(64), ForeignKey('terms.code'), nullable=True)
     category = relationship("Categories", back_populates="item")
+    term = relationship("Term", lazy='joined')
     values = relationship("ItemValues", back_populates="item")
 
     def __init__(self, name: str, price: int, description: str, category_name: str,
-                 delivery_description: str | None = None):
+                 delivery_description: str | None = None, term_code: str | None = None):
         self.name = name
         self.price = price
         self.description = description
         self.delivery_description = delivery_description
         self.category_name = category_name
+        self.term_code = term_code
 
 
 class ItemValues(Database.BASE):
@@ -192,16 +223,18 @@ class BoughtGoods(Database.BASE):
     buyer_id = Column(BigInteger, ForeignKey('users.telegram_id'), nullable=False)
     bought_datetime = Column(VARCHAR, nullable=False)
     unique_id = Column(BigInteger, nullable=False, unique=True)
+    term_code = Column(String(64), ForeignKey('terms.code'), nullable=True)
     user_telegram_id = relationship("User", back_populates="user_goods")
 
     def __init__(self, name: str, value: str, price: int, bought_datetime: str, unique_id,
-                 buyer_id: int = 0):
+                 buyer_id: int = 0, term_code: str | None = None):
         self.item_name = name
         self.value = value
         self.price = price
         self.buyer_id = buyer_id
         self.bought_datetime = bought_datetime
         self.unique_id = unique_id
+        self.term_code = term_code
 
 
 class Operations(Database.BASE):
@@ -237,9 +270,20 @@ class UnfinishedOperations(Database.BASE):
 class Achievement(Database.BASE):
     __tablename__ = 'achievements'
     code = Column(String(50), primary_key=True, unique=True)
+    config = Column(Text, nullable=True)
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, config: dict | None = None):
         self.code = code
+        self.config = json.dumps(config or {}, ensure_ascii=False)
+
+    def config_dict(self) -> dict:
+        try:
+            data = json.loads(self.config) if self.config else {}
+        except (TypeError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        return data
 
 
 class UserAchievement(Database.BASE):
@@ -418,12 +462,16 @@ class LevelSettings(Database.BASE):
     id = Column(Integer, primary_key=True)
     thresholds = Column(Text, nullable=False)
     names = Column(Text, nullable=False)
+    rewards = Column(Text, nullable=False)
 
-    def __init__(self, thresholds: list[int] | None = None, names: dict[str, list[str]] | None = None):
+    def __init__(self, thresholds: list[int] | None = None, names: dict[str, list[str]] | None = None,
+                 rewards: list[int] | None = None):
         base_thresholds = thresholds or list(DEFAULT_LEVEL_THRESHOLDS)
         base_names = names or DEFAULT_LEVEL_NAMES
+        base_rewards = rewards or [0 for _ in base_thresholds]
         self.thresholds = json.dumps(list(base_thresholds))
         self.names = json.dumps(base_names, ensure_ascii=False)
+        self.rewards = json.dumps(list(base_rewards))
 
 
 class ProfileSettings(Database.BASE):
@@ -446,6 +494,54 @@ class ProfileSettings(Database.BASE):
         merged = DEFAULT_PROFILE_SETTINGS.copy()
         merged.update(stored)
         return merged
+
+
+class QuestSettings(Database.BASE):
+    __tablename__ = 'quest_settings'
+
+    id = Column(Integer, primary_key=True)
+    titles = Column(Text, nullable=False)
+    tasks = Column(Text, nullable=False)
+    reward = Column(Text, nullable=False)
+    reset_weekday = Column(Integer, nullable=False, default=0)
+    reset_hour = Column(Integer, nullable=False, default=12)
+
+    def __init__(self,
+                 titles: dict | None = None,
+                 tasks: list[dict] | None = None,
+                 reward: dict | None = None,
+                 reset_weekday: int | None = None,
+                 reset_hour: int | None = None):
+        self.titles = json.dumps(titles or DEFAULT_QUEST_TITLES, ensure_ascii=False)
+        self.tasks = json.dumps(tasks or DEFAULT_QUEST_TASKS, ensure_ascii=False)
+        self.reward = json.dumps(reward or DEFAULT_QUEST_REWARD, ensure_ascii=False)
+        reset_defaults = DEFAULT_QUEST_RESET
+        self.reset_weekday = reset_weekday if reset_weekday is not None else reset_defaults['weekday']
+        self.reset_hour = reset_hour if reset_hour is not None else reset_defaults['hour']
+
+    def titles_dict(self) -> dict:
+        try:
+            return json.loads(self.titles) if self.titles else DEFAULT_QUEST_TITLES
+        except (TypeError, ValueError):  # pragma: no cover - unexpected data
+            return DEFAULT_QUEST_TITLES
+
+    def tasks_list(self) -> list[dict]:
+        try:
+            data = json.loads(self.tasks) if self.tasks else []
+        except (TypeError, ValueError):
+            data = []
+        if not isinstance(data, list):
+            return []
+        return data
+
+    def reward_dict(self) -> dict:
+        try:
+            data = json.loads(self.reward) if self.reward else {}
+        except (TypeError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        return data
 
 
 def register_models():
@@ -492,6 +588,27 @@ def register_models():
                 connection.execute(
                     text("ALTER TABLE promo_codes ADD COLUMN applicable_items TEXT")
                 )
+    if 'goods' in inspector.get_table_names():
+        goods_columns = {column['name'] for column in inspector.get_columns('goods')}
+        if 'term_code' not in goods_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE goods ADD COLUMN term_code VARCHAR(64)"))
+    if 'bought_goods' in inspector.get_table_names():
+        bought_columns = {column['name'] for column in inspector.get_columns('bought_goods')}
+        if 'term_code' not in bought_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE bought_goods ADD COLUMN term_code VARCHAR(64)"))
+    if 'achievements' in inspector.get_table_names():
+        achievement_columns = {column['name'] for column in inspector.get_columns('achievements')}
+        if 'config' not in achievement_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE achievements ADD COLUMN config TEXT"))
+    if 'level_settings' in inspector.get_table_names():
+        level_columns = {column['name'] for column in inspector.get_columns('level_settings')}
+        if 'rewards' not in level_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE level_settings ADD COLUMN rewards TEXT"))
+                connection.execute(text("UPDATE level_settings SET rewards = '[]' WHERE rewards IS NULL"))
     if 'reseller_prices' in inspector.get_table_names():
         for column in inspector.get_columns('reseller_prices'):
             if column['name'] == 'reseller_id' and not column['nullable']:
@@ -501,6 +618,8 @@ def register_models():
     _ensure_main_menu_defaults()
     _ensure_level_settings()
     _ensure_profile_settings()
+    _ensure_quest_settings()
+    _ensure_achievement_defaults()
     Role.insert_roles()
 
 
@@ -543,8 +662,92 @@ def _ensure_main_menu_defaults() -> None:
 
 def _ensure_level_settings() -> None:
     session = Database().session
-    if session.query(LevelSettings).first() is None:
+    entry = session.query(LevelSettings).first()
+    if entry is None:
         session.add(LevelSettings())
+        session.commit()
+        return
+    changed = False
+    try:
+        raw_thresholds = json.loads(entry.thresholds or '[]')
+    except (TypeError, ValueError):
+        raw_thresholds = []
+    if not isinstance(raw_thresholds, list):
+        raw_thresholds = []
+    thresholds: list[int] = []
+    for value in raw_thresholds:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number < 0 or number in thresholds:
+            continue
+        thresholds.append(number)
+    if not thresholds:
+        thresholds = list(DEFAULT_LEVEL_THRESHOLDS)
+    if 0 not in thresholds:
+        thresholds.append(0)
+    thresholds.sort()
+    if thresholds != raw_thresholds:
+        changed = True
+
+    try:
+        raw_names = json.loads(entry.names or '{}')
+    except (TypeError, ValueError):
+        raw_names = {}
+    if not isinstance(raw_names, dict):
+        raw_names = {}
+    languages = set(DEFAULT_LEVEL_NAMES.keys()) | set(raw_names.keys())
+    cleaned_names: dict[str, list[str]] = {}
+    for language in languages:
+        defaults = DEFAULT_LEVEL_NAMES.get(language, DEFAULT_LEVEL_NAMES.get('en', []))
+        existing = raw_names.get(language)
+        if not isinstance(existing, list):
+            existing = []
+        values: list[str] = []
+        for index in range(len(thresholds)):
+            text = ''
+            if index < len(existing):
+                raw_value = existing[index]
+                if raw_value is not None:
+                    text = str(raw_value).strip()
+            if not text:
+                if index < len(defaults):
+                    text = defaults[index]
+                else:
+                    text = f'Level {index + 1}'
+            values.append(text)
+        cleaned_names[language] = values
+    if cleaned_names != raw_names:
+        changed = True
+
+    try:
+        raw_rewards = json.loads(entry.rewards or '[]')
+    except (TypeError, ValueError):
+        raw_rewards = []
+    if not isinstance(raw_rewards, list):
+        raw_rewards = []
+    rewards: list[int] = []
+    for index in range(len(thresholds)):
+        value = 0
+        if index < len(raw_rewards):
+            try:
+                number = int(raw_rewards[index])
+            except (TypeError, ValueError):
+                number = 0
+            if number < 0:
+                number = 0
+            if number > 100:
+                number = 100
+            value = number
+        rewards.append(value)
+    if rewards != raw_rewards:
+        changed = True
+
+    if changed:
+        entry.thresholds = json.dumps(thresholds)
+        entry.names = json.dumps(cleaned_names, ensure_ascii=False)
+        entry.rewards = json.dumps(rewards)
         session.commit()
 
 
@@ -552,4 +755,98 @@ def _ensure_profile_settings() -> None:
     session = Database().session
     if session.query(ProfileSettings).first() is None:
         session.add(ProfileSettings())
+        session.commit()
+
+
+def _ensure_quest_settings() -> None:
+    session = Database().session
+    entry = session.query(QuestSettings).first()
+    if entry is None:
+        session.add(QuestSettings())
+        session.commit()
+        return
+    changed = False
+    titles = entry.titles_dict()
+    languages = set(DEFAULT_QUEST_TITLES.keys()) | set(titles.keys())
+    merged_titles: dict[str, dict[str, str]] = {}
+    for language in languages:
+        defaults = DEFAULT_QUEST_TITLES.get(language, DEFAULT_QUEST_TITLES['en'])
+        existing = titles.get(language, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        title_text = existing.get('title') or defaults['title']
+        desc_text = existing.get('description') or defaults['description']
+        merged_titles[language] = {
+            'title': str(title_text).strip(),
+            'description': str(desc_text).strip(),
+        }
+    if merged_titles != titles:
+        entry.titles = json.dumps(merged_titles, ensure_ascii=False)
+        changed = True
+
+    tasks = entry.tasks_list()
+    if not isinstance(tasks, list):
+        tasks = []
+        entry.tasks = json.dumps([], ensure_ascii=False)
+        changed = True
+
+    reward = entry.reward_dict()
+    if 'type' not in reward:
+        reward['type'] = DEFAULT_QUEST_REWARD['type']
+        changed = True
+    if reward['type'] not in {'discount', 'stock'}:
+        reward['type'] = 'discount'
+        changed = True
+    if reward['type'] == 'discount':
+        try:
+            value = int(reward.get('value', DEFAULT_QUEST_REWARD['value']))
+        except (TypeError, ValueError):
+            value = DEFAULT_QUEST_REWARD['value']
+        value = max(0, min(100, value))
+        reward['value'] = value
+    else:
+        reward['value'] = str(reward.get('value') or '')
+    titles_map = reward.get('title')
+    if not isinstance(titles_map, dict):
+        titles_map = {}
+    reward_titles: dict[str, str] = {}
+    for language in languages:
+        base = DEFAULT_QUEST_REWARD['title'].get(language, DEFAULT_QUEST_REWARD['title']['en'])
+        reward_titles[language] = str(titles_map.get(language) or base).strip()
+    reward['title'] = reward_titles
+    reset_weekday = entry.reset_weekday if entry.reset_weekday is not None else DEFAULT_QUEST_RESET['weekday']
+    reset_hour = entry.reset_hour if entry.reset_hour is not None else DEFAULT_QUEST_RESET['hour']
+    if reset_weekday < 0 or reset_weekday > 6:
+        reset_weekday = DEFAULT_QUEST_RESET['weekday']
+    if reset_hour < 0 or reset_hour > 23:
+        reset_hour = DEFAULT_QUEST_RESET['hour']
+    if entry.reset_weekday != reset_weekday:
+        entry.reset_weekday = reset_weekday
+        changed = True
+    if entry.reset_hour != reset_hour:
+        entry.reset_hour = reset_hour
+        changed = True
+    if changed:
+        entry.reward = json.dumps(reward, ensure_ascii=False)
+        session.commit()
+
+
+def _ensure_achievement_defaults() -> None:
+    session = Database().session
+    existing = {ach.code: ach for ach in session.query(Achievement).all()}
+    changed = False
+    for code, defaults in DEFAULT_ACHIEVEMENTS.items():
+        if code not in existing:
+            session.add(Achievement(code=code, config=defaults))
+            changed = True
+        else:
+            entry = existing[code]
+            config = entry.config_dict()
+            original = dict(config)
+            for key, value in defaults.items():
+                config.setdefault(key, value)
+            if config != original:
+                entry.config = json.dumps(config, ensure_ascii=False)
+                changed = True
+    if changed:
         session.commit()
