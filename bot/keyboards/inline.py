@@ -253,15 +253,19 @@ def item_info(item_name: str, category_name: str, lang: str) -> InlineKeyboardMa
     return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
 
 
-def profile(user_items: int = 0, lang: str = 'en') -> InlineKeyboardMarkup:
-    inline_keyboard = [
-        [InlineKeyboardButton(t(lang, 'games'), callback_data='games')],
-        [InlineKeyboardButton(t(lang, 'achievements'), callback_data='achievements')],
-        [InlineKeyboardButton(t(lang, 'quests'), callback_data='quests')],
-        [InlineKeyboardButton(t(lang, 'top_up'), callback_data='replenish_balance')],
-        [InlineKeyboardButton(t(lang, 'gift'), callback_data='gift')],
-        [InlineKeyboardButton(t(lang, 'stock_notify'), callback_data='notify_stock')],
-    ]
+def profile(user_items: int = 0, lang: str = 'en', settings: dict | None = None) -> InlineKeyboardMarkup:
+    settings = settings or {}
+    inline_keyboard: list[list[InlineKeyboardButton]] = []
+    if settings.get('blackjack_enabled', True):
+        inline_keyboard.append([InlineKeyboardButton(t(lang, 'games'), callback_data='games')])
+    inline_keyboard.append([InlineKeyboardButton(t(lang, 'achievements'), callback_data='achievements')])
+    if settings.get('quests_enabled', True):
+        inline_keyboard.append([InlineKeyboardButton(t(lang, 'quests'), callback_data='quests')])
+    if settings.get('missions_enabled'):
+        inline_keyboard.append([InlineKeyboardButton(t(lang, 'missions'), callback_data='missions')])
+    inline_keyboard.append([InlineKeyboardButton(t(lang, 'top_up'), callback_data='replenish_balance')])
+    inline_keyboard.append([InlineKeyboardButton(t(lang, 'gift'), callback_data='gift')])
+    inline_keyboard.append([InlineKeyboardButton(t(lang, 'stock_notify'), callback_data='notify_stock')])
     if user_items != 0:
         inline_keyboard.append([
             InlineKeyboardButton(t(lang, 'purchased_items'), callback_data='bought_items')
@@ -525,21 +529,103 @@ def information_menu(role: int) -> InlineKeyboardMarkup:
 
 
 def tools_menu(role: int) -> InlineKeyboardMarkup:
-    inline_keyboard = [
-        [InlineKeyboardButton('🎰 Loterija', callback_data='lottery')],
-    ]
-    if role & Permission.OWN:
-        inline_keyboard.append([InlineKeyboardButton('⛔️ Išjungti funkcijas', callback_data='functions_disable')])
-        inline_keyboard.append([InlineKeyboardButton('✅ Įjungti funkcijas', callback_data='functions_enable')])
-        inline_keyboard.append([InlineKeyboardButton('👔 Savininkų priskyrimas', callback_data='owner_management')])
-        inline_keyboard.append([InlineKeyboardButton('🛡️ Asistentų priskyrimas', callback_data='assistant_management')])
-    if role & Permission.BROADCAST:
-        inline_keyboard.append([InlineKeyboardButton('📣 Pranešimų siuntimas', callback_data='send_message')])
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.row(
+        InlineKeyboardButton('🎮 Žaidimai', callback_data='tools_cat_games'),
+        InlineKeyboardButton('👤 Profilis', callback_data='tools_cat_profile'),
+    )
+    markup.row(
+        InlineKeyboardButton('🚀 Progresas', callback_data='tools_cat_progress'),
+    )
+    management_row: list[InlineKeyboardButton] = []
+    if role & (Permission.OWN | Permission.ADMINS_MANAGE):
+        management_row.append(InlineKeyboardButton('🤝 Komanda', callback_data='tools_cat_team'))
     if role & Permission.SHOP_MANAGE:
-        inline_keyboard.append([InlineKeyboardButton('🤝 Reselleriai', callback_data='resellers_management')])
-        inline_keyboard.append([InlineKeyboardButton('🏷️ Nuolaidų kodai', callback_data='promo_management')])
-    inline_keyboard.append([InlineKeyboardButton('🔙 Grįžti atgal', callback_data='navback:console')])
-    return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+        management_row.append(InlineKeyboardButton('🏷️ Pardavimai', callback_data='tools_cat_sales'))
+    if management_row:
+        if len(management_row) == 1:
+            markup.add(management_row[0])
+        else:
+            markup.row(*management_row)
+    if role & Permission.BROADCAST:
+        markup.add(InlineKeyboardButton('📣 Komunikacija', callback_data='tools_cat_broadcast'))
+    markup.add(InlineKeyboardButton('⬅️ Grįžti į meniu', callback_data='navback:console'))
+    return markup
+
+
+def tools_games_menu(role: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(InlineKeyboardButton('🎰 Loterija', callback_data='lottery'))
+    if role & (Permission.OWN | Permission.SETTINGS_MANAGE):
+        markup.add(InlineKeyboardButton('🃏 Blackjack nustatymai', callback_data='profile_blackjack_settings'))
+    markup.add(InlineKeyboardButton('🔙 Grįžti atgal', callback_data=_navback('miscs')))
+    return markup
+
+
+def tools_progress_menu() -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.row(
+        InlineKeyboardButton('🏆 Lygiai', callback_data='catalog_edit_levels'),
+        InlineKeyboardButton('🧩 Savaitės užduotis', callback_data='tools_progress_quest'),
+    )
+    markup.row(
+        InlineKeyboardButton('🏅 Pasiekimai', callback_data='tools_progress_achievements'),
+        InlineKeyboardButton('🏷️ Terminai', callback_data='tools_progress_terms'),
+    )
+    markup.add(InlineKeyboardButton('🔙 Grįžti atgal', callback_data=_navback('miscs')))
+    return markup
+
+
+def tools_profile_menu(settings: dict) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=2)
+    profile_status = '🟢' if settings.get('profile_enabled', True) else '🔴'
+    games_status = '🟢' if settings.get('blackjack_enabled', True) else '🔴'
+    quests_status = '🟢' if settings.get('quests_enabled', True) else '🔴'
+    missions_status = '🟢' if settings.get('missions_enabled') else '🔴'
+    markup.row(
+        InlineKeyboardButton(f'{profile_status} Profilis', callback_data='profile_toggle:profile_enabled'),
+        InlineKeyboardButton(f'{games_status} Blackjack', callback_data='profile_toggle:blackjack_enabled'),
+    )
+    markup.row(
+        InlineKeyboardButton(f'{quests_status} Uždaviniai', callback_data='profile_toggle:quests_enabled'),
+        InlineKeyboardButton(f'{missions_status} Misijos', callback_data='profile_toggle:missions_enabled'),
+    )
+    markup.add(InlineKeyboardButton(
+        f"💵 Maks. statymas: {settings.get('blackjack_max_bet', 5)}€",
+        callback_data='profile_blackjack_max_bet',
+    ))
+    markup.row(
+        InlineKeyboardButton('✏️ Uždavinių tekstas', callback_data='profile_edit_quests'),
+        InlineKeyboardButton('✏️ Misijų tekstas', callback_data='profile_edit_missions'),
+    )
+    markup.add(InlineKeyboardButton('🔙 Grįžti atgal', callback_data=_navback('miscs')))
+    return markup
+
+
+def tools_team_menu(role: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    if role & Permission.OWN:
+        markup.add(InlineKeyboardButton('👔 Savininkų priskyrimas', callback_data='owner_management'))
+        markup.add(InlineKeyboardButton('🛡️ Asistentų priskyrimas', callback_data='assistant_management'))
+    markup.add(InlineKeyboardButton('🔙 Grįžti atgal', callback_data=_navback('miscs')))
+    return markup
+
+
+def tools_sales_menu(role: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    if role & Permission.SHOP_MANAGE:
+        markup.add(InlineKeyboardButton('🤝 Reselleriai', callback_data='resellers_management'))
+        markup.add(InlineKeyboardButton('🏷️ Nuolaidų kodai', callback_data='promo_management'))
+    markup.add(InlineKeyboardButton('🔙 Grįžti atgal', callback_data=_navback('miscs')))
+    return markup
+
+
+def tools_broadcast_menu(role: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    if role & Permission.BROADCAST:
+        markup.add(InlineKeyboardButton('📣 Pranešimų siuntimas', callback_data='send_message'))
+    markup.add(InlineKeyboardButton('🔙 Grįžti atgal', callback_data=_navback('miscs')))
+    return markup
 
 
 def admin_language_menu(current_lang: str) -> InlineKeyboardMarkup:
@@ -627,6 +713,7 @@ def catalog_editor_menu(lang: str = 'en') -> InlineKeyboardMarkup:
         [InlineKeyboardButton('📝 Teksto redagavimas', callback_data='catalog_edit_main')],
         [InlineKeyboardButton('🔘 Mygtukų redagavimas', callback_data='catalog_edit_buttons')],
         [InlineKeyboardButton('✨ Emodžių redagavimas', callback_data='catalog_edit_emojis')],
+        [InlineKeyboardButton(t(lang, 'catalog_levels_button'), callback_data='catalog_edit_levels')],
         [InlineKeyboardButton(t(lang, 'back'), callback_data=_navback('catalog_editor'))],
     ]
     return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)

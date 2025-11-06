@@ -37,6 +37,7 @@ from bot.database.methods import (
     remove_cart_item, clear_cart,
     is_category_locked, get_user_category_password, get_generated_password,
     get_main_menu_text,
+    get_profile_settings,
 )
 from bot.database.methods.update import (
     process_purchase_streak,
@@ -755,6 +756,14 @@ async def price_list_callback_handler(call: CallbackQuery):
 
 async def blackjack_callback_handler(call: CallbackQuery):
     bot, user_id = await get_bot_user_ids(call)
+    settings = get_profile_settings()
+    user_lang = get_user_language(user_id) or 'en'
+    if not settings.get('profile_enabled', True):
+        await call.answer(t(user_lang, 'profile_disabled'), show_alert=True)
+        return
+    if not settings.get('blackjack_enabled', True):
+        await call.answer(t(user_lang, 'blackjack_disabled'), show_alert=True)
+        return
     stats = TgConfig.BLACKJACK_STATS.get(user_id, {'games':0,'wins':0,'losses':0,'profit':0})
     games = stats.get('games', 0)
     wins = stats.get('wins', 0)
@@ -784,6 +793,14 @@ async def blackjack_callback_handler(call: CallbackQuery):
 
 async def blackjack_place_bet_handler(call: CallbackQuery):
     bot, user_id = await get_bot_user_ids(call)
+    settings = get_profile_settings()
+    user_lang = get_user_language(user_id) or 'en'
+    if not settings.get('profile_enabled', True):
+        await call.answer(t(user_lang, 'profile_disabled'), show_alert=True)
+        return
+    if not settings.get('blackjack_enabled', True):
+        await call.answer(t(user_lang, 'blackjack_disabled'), show_alert=True)
+        return
     bet = TgConfig.STATE.get(f'{user_id}_bet')
     if not bet:
         await call.answer('❌ Enter bet amount first')
@@ -793,6 +810,15 @@ async def blackjack_place_bet_handler(call: CallbackQuery):
 
 
 async def blackjack_play_again_handler(call: CallbackQuery):
+    settings = get_profile_settings()
+    bot, user_id = await get_bot_user_ids(call)
+    user_lang = get_user_language(user_id) or 'en'
+    if not settings.get('profile_enabled', True):
+        await call.answer(t(user_lang, 'profile_disabled'), show_alert=True)
+        return
+    if not settings.get('blackjack_enabled', True):
+        await call.answer(t(user_lang, 'blackjack_disabled'), show_alert=True)
+        return
     bet = int(call.data.split('_')[2])
     await start_blackjack_game(call, bet)
 
@@ -801,10 +827,17 @@ async def blackjack_receive_bet(message: Message):
     bot, user_id = await get_bot_user_ids(message)
     text = message.text
     balance = get_user_balance(user_id)
+    settings = get_profile_settings()
+    if not settings.get('profile_enabled', True) or not settings.get('blackjack_enabled', True):
+        lang = get_user_language(user_id) or 'en'
+        await bot.send_message(user_id, t(lang, 'blackjack_disabled'))
+        TgConfig.STATE[user_id] = None
+        return
+    max_bet = settings.get('blackjack_max_bet', 5)
     if not text.isdigit() or int(text) <= 0:
         await bot.send_message(user_id, '❌ Invalid bet amount')
-    elif int(text) > 5:
-        await bot.send_message(user_id, '❌ Maximum bet is 5€')
+    elif int(text) > max_bet:
+        await bot.send_message(user_id, f'❌ Maximum bet is {max_bet}€')
     elif int(text) > balance:
         markup = InlineKeyboardMarkup().add(
             InlineKeyboardButton('💳 Top up balance', callback_data='replenish_balance'))
@@ -833,7 +866,14 @@ async def blackjack_receive_bet(message: Message):
 async def blackjack_set_bet_handler(call: CallbackQuery):
     bot, user_id = await get_bot_user_ids(call)
     TgConfig.STATE[user_id] = 'blackjack_enter_bet'
-    msg = await call.message.answer('💵 Enter bet amount:')
+    settings = get_profile_settings()
+    user_lang = get_user_language(user_id) or 'en'
+    if not settings.get('profile_enabled', True) or not settings.get('blackjack_enabled', True):
+        await call.answer(t(user_lang, 'blackjack_disabled'), show_alert=True)
+        TgConfig.STATE[user_id] = None
+        return
+    max_bet = settings.get('blackjack_max_bet', 5)
+    msg = await call.message.answer(f"{t(user_lang, 'enter_bet')} (max {max_bet}€)")
     TgConfig.STATE[f'{user_id}_bet_prompt'] = msg.message_id
 
 
@@ -908,19 +948,25 @@ async def product_feedback_handler(call: CallbackQuery):
 
 async def start_blackjack_game(call: CallbackQuery, bet: int):
     bot, user_id = await get_bot_user_ids(call)
-    await call.answer()
-    balance = get_user_balance(user_id)
+    settings = get_profile_settings()
+    user_lang = get_user_language(user_id) or 'en'
+    if not settings.get('blackjack_enabled', True):
+        await call.answer(t(user_lang, 'blackjack_disabled'), show_alert=True)
+        return
     if bet <= 0:
         await call.answer('❌ Invalid bet')
         return
-    if bet > 5:
-        await call.answer('❌ Maximum bet is 5€', show_alert=True)
+    max_bet = settings.get('blackjack_max_bet', 5)
+    if bet > max_bet:
+        await call.answer(f'❌ Maximum bet is {max_bet}€', show_alert=True)
         return
+    balance = get_user_balance(user_id)
     if bet > balance:
         markup = InlineKeyboardMarkup().add(
             InlineKeyboardButton('💳 Top up balance', callback_data='replenish_balance'))
         await bot.send_message(user_id, "❌ You don't have that much money", reply_markup=markup)
         return
+    await call.answer()
     buy_item_for_balance(user_id, bet)
     deck = [2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 11] * 4
     random.shuffle(deck)
@@ -1054,6 +1100,13 @@ async def games_callback_handler(call: CallbackQuery):
     bot, user_id = await get_bot_user_ids(call)
     user_lang = get_user_language(user_id) or 'en'
     TgConfig.STATE[user_id] = None
+    settings = get_profile_settings()
+    if not settings.get('profile_enabled', True):
+        await call.answer(t(user_lang, 'profile_disabled'), show_alert=True)
+        return
+    if not settings.get('blackjack_enabled', True):
+        await call.answer(t(user_lang, 'blackjack_disabled'), show_alert=True)
+        return
     await safe_edit_message_text(bot, t(user_lang, 'choose_game'),
                                 chat_id=call.message.chat.id,
                                 message_id=call.message.message_id,
@@ -1830,7 +1883,9 @@ async def _complete_cart_checkout(
         sale_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
 
         new_balance = buy_item_for_balance(user_id, price_float)
-        add_bought_item(value_data['item_name'], value_data['value'], price_float, user_id, sale_time)
+        item_info = get_item_info(value_data['item_name'], user_id)
+        term_code = item_info.get('term_code') if item_info else None
+        add_bought_item(value_data['item_name'], value_data['value'], price_float, user_id, sale_time, term_code)
 
         if referral_id and TgConfig.REFERRAL_PERCENT and can_get_referral_reward(value_data['item_name']):
             reward = round(price_float * TgConfig.REFERRAL_PERCENT / 100, 2)
@@ -1848,7 +1903,7 @@ async def _complete_cart_checkout(
         if level_after != level_before:
             await bot.send_message(user_id, t(lang, 'level_up', level=level_after))
 
-        item_info = get_item_info(value_data['item_name'], user_id)
+        item_info = item_info or get_item_info(value_data['item_name'], user_id)
         parent_cat = get_category_parent(item_info['category_name']) if item_info else None
 
         photo_desc = ''
@@ -2138,11 +2193,33 @@ async def buy_item_callback_handler(call: CallbackQuery):
             current_time = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
             formatted_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
             new_balance = buy_item_for_balance(user_id, item_price)
+            term_code = (item_info_list or {}).get('term_code') if item_info_list else None
             if gift_to:
-                add_bought_item(value_data['item_name'], value_data['value'], item_price, gift_to, formatted_time)
-                add_bought_item(value_data['item_name'], f'Gifted to @{gift_name}', item_price, user_id, formatted_time)
+                add_bought_item(
+                    value_data['item_name'],
+                    value_data['value'],
+                    item_price,
+                    gift_to,
+                    formatted_time,
+                    term_code,
+                )
+                add_bought_item(
+                    value_data['item_name'],
+                    f'Gifted to @{gift_name}',
+                    item_price,
+                    user_id,
+                    formatted_time,
+                    term_code,
+                )
             else:
-                add_bought_item(value_data['item_name'], value_data['value'], item_price, user_id, formatted_time)
+                add_bought_item(
+                    value_data['item_name'],
+                    value_data['value'],
+                    item_price,
+                    user_id,
+                    formatted_time,
+                    term_code,
+                )
 
             referral_id = get_user_referral(user_id)
             if referral_id and TgConfig.REFERRAL_PERCENT and can_get_referral_reward(value_data['item_name']):
@@ -2631,13 +2708,17 @@ async def profile_callback_handler(call: CallbackQuery):
             overall_balance += i
 
     items = select_user_items(user_id)
+    settings = get_profile_settings()
+    if not settings.get('profile_enabled', True):
+        await call.answer(t(user_lang, 'profile_disabled'), show_alert=True)
+        return
     ref_count = check_user_referrals(user_id)
     ref_total = sum_referral_operations(user_id)
     ref_earnings = round(ref_total * TgConfig.REFERRAL_PERCENT / 100, 2)
     bot_username = await get_bot_info(call)
     encoded_id = base64.urlsafe_b64encode(str(user_id).encode()).decode().rstrip('=')
     ref_link = f"https://t.me/{bot_username}?start=ref_{encoded_id}"
-    markup = profile(items, user_lang)
+    markup = profile(items, user_lang, settings)
     await safe_edit_message_text(bot, 
         text=(
             f"👤 <b>Profile</b> — {user.first_name}\n🆔 <b>ID</b> — <code>{user_id}</code>\n"
@@ -2659,14 +2740,35 @@ async def profile_callback_handler(call: CallbackQuery):
 async def quests_callback_handler(call: CallbackQuery):
     bot, user_id = await get_bot_user_ids(call)
     lang = get_user_language(user_id) or 'en'
-    await safe_edit_message_text(bot, 
+    settings = get_profile_settings()
+    if not settings.get('quests_enabled', True):
+        await call.answer(t(lang, 'quests_disabled'), show_alert=True)
+        return
+    description = settings.get('quests_description') or t(lang, 'quests_placeholder')
+    await safe_edit_message_text(bot,
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        text=t(lang, 'quests_placeholder'),
+        text=description,
         reply_markup=back('profile')
     )
 
 
+
+
+async def missions_callback_handler(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    lang = get_user_language(user_id) or 'en'
+    settings = get_profile_settings()
+    if not settings.get('missions_enabled', False):
+        await call.answer(t(lang, 'missions_disabled'), show_alert=True)
+        return
+    description = settings.get('missions_description') or t(lang, 'missions_placeholder')
+    await safe_edit_message_text(bot,
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text=description,
+        reply_markup=back('profile')
+    )
 
 
 async def achievements_callback_handler(call: CallbackQuery):
@@ -2939,11 +3041,33 @@ async def _complete_invoice_item_purchase(
 
     username = actor_username
     new_balance = buy_item_for_balance(user_id, price)
+    term_code = (item_info_list or {}).get('term_code') if item_info_list else None
     if gift_to:
-        add_bought_item(value_data['item_name'], value_data['value'], price, gift_to, formatted_time)
-        add_bought_item(value_data['item_name'], f'Gifted to @{gift_name}', price, user_id, formatted_time)
+        add_bought_item(
+            value_data['item_name'],
+            value_data['value'],
+            price,
+            gift_to,
+            formatted_time,
+            term_code,
+        )
+        add_bought_item(
+            value_data['item_name'],
+            f'Gifted to @{gift_name}',
+            price,
+            user_id,
+            formatted_time,
+            term_code,
+        )
     else:
-        add_bought_item(value_data['item_name'], value_data['value'], price, user_id, formatted_time)
+        add_bought_item(
+            value_data['item_name'],
+            value_data['value'],
+            price,
+            user_id,
+            formatted_time,
+            term_code,
+        )
 
     purchases = select_user_items(user_id)
     photo_desc = ''
@@ -3309,6 +3433,8 @@ def register_user_handlers(dp: Dispatcher):
                                        lambda c: c.data == 'gift')
     dp.register_callback_query_handler(quests_callback_handler,
                                        lambda c: c.data == 'quests')
+    dp.register_callback_query_handler(missions_callback_handler,
+                                       lambda c: c.data == 'missions')
     dp.register_callback_query_handler(achievements_callback_handler,
                                        lambda c: c.data.startswith('achievements'))
     dp.register_callback_query_handler(notify_stock_callback_handler,

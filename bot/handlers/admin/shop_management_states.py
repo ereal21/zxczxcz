@@ -1,6 +1,8 @@
 import datetime
 import html
+import math
 import os
+import re
 import shutil
 
 import secrets
@@ -32,6 +34,7 @@ from bot.database.methods import (
     get_category_parent,
     get_category_title,
     get_category_titles,
+    list_terms,
     get_item_info,
     get_user_count,
     get_user_language,
@@ -61,6 +64,12 @@ from bot.database.methods import (
     get_main_menu_button,
     get_main_menu_text,
     get_ui_emoji_overrides,
+    get_level_settings,
+    set_level_thresholds,
+    set_level_names,
+    set_level_rewards,
+    reset_level_settings,
+    get_user_level_stats,
 )
 from bot.database.methods.update import (
     update_main_menu_button,
@@ -72,6 +81,7 @@ from bot.database.methods.update import (
     clear_ui_emoji_overrides,
 )
 from bot.utils import generate_internal_name, display_name, notify_restock, safe_edit_message_text
+from bot.utils.level import get_level_info
 
 
 from bot.utils.files import get_next_file_path
@@ -91,6 +101,7 @@ from bot.keyboards import (
     promo_manage_actions,
     catalog_editor_menu,
 )
+from bot.keyboards.inline import _navback
 from bot.logger_mesh import logger
 from bot.misc import TgConfig, EnvKeys
 from bot.utils.statistics import collect_shop_statistics, format_admin_statistics
@@ -98,6 +109,15 @@ from bot.constants.main_menu import MENU_BUTTON_TRANSLATIONS, DEFAULT_MAIN_MENU_
 
 
 MAX_SELECTION_DEPTH = 32
+
+
+_LEVEL_LANGUAGE_KEY_BY_CODE = {
+    'en': 'catalog_text_language_en',
+    'lt': 'catalog_text_language_lt',
+    'ru': 'catalog_text_language_ru',
+}
+_LEVEL_LANGUAGE_ORDER = ('lt', 'en', 'ru')
+_LEVELS_PAGE_SIZE = 10
 
 
 def _get_lang(user_id: int) -> str:
@@ -1729,6 +1749,7 @@ async def add_item_callback_handler(call: CallbackQuery):
     bot, user_id = await get_bot_user_ids(call)
     TgConfig.STATE[f'{user_id}_message_id'] = call.message.message_id
     TgConfig.STATE[f'{user_id}_item_update_back'] = 'item-management'
+    TgConfig.STATE.pop(f'{user_id}_item_term', None)
     TgConfig.STATE[user_id] = 'create_item_name'
     role = check_role(user_id)
     if role & Permission.SHOP_MANAGE:
@@ -2125,6 +2146,8 @@ def _cleanup_item_creation_state(user_id: int, keep_preview: bool = False) -> No
     TgConfig.STATE.pop(f'{user_id}_item_destination_names', None)
     TgConfig.STATE.pop(f'{user_id}_item_token_store', None)
     TgConfig.STATE.pop(f'{user_id}_message_id', None)
+    TgConfig.STATE.pop(f'{user_id}_item_term', None)
+    TgConfig.STATE.pop(f'{user_id}_terms_back', None)
     for key in ('name', 'description', 'price'):
         TgConfig.STATE.pop(f'{user_id}_{key}', None)
     preview = TgConfig.STATE.pop(f'{user_id}_preview_path', None)
@@ -2161,7 +2184,8 @@ async def _prompt_next_destination_name(bot, chat_id: int, message_id: int, user
     lang = _get_lang(user_id)
     total = len(destinations)
     if index >= total:
-        await _finalize_item_creation(bot, chat_id, message_id, user_id)
+        lang = _get_lang(user_id)
+        await _prompt_item_term(bot, chat_id, message_id, user_id, lang)
         return
     category = destinations[index]
     path = _format_assign_path(category)
@@ -2183,12 +2207,92 @@ async def _prompt_next_destination_name(bot, chat_id: int, message_id: int, user
             )
         )
     markup.add(InlineKeyboardButton(t(lang, 'action_cancel'), callback_data='itemdest_names_cancel'))
-    await safe_edit_message_text(bot, 
+    await safe_edit_message_text(bot,
         prompt,
         chat_id=chat_id,
         message_id=message_id,
         reply_markup=markup,
     )
+
+
+async def _prompt_item_term(
+    bot,
+    chat_id: int,
+    message_id: int,
+    user_id: int,
+    lang: str,
+    notice: str | None = None,
+) -> None:
+    terms = list_terms()
+    TgConfig.STATE[f'{user_id}_terms_back'] = 'item_term_prompt'
+    TgConfig.STATE[user_id] = 'create_item_term'
+    lines = [t(lang, 'catalog_item_term_heading')]
+    if notice:
+        lines.extend(['', notice])
+    if not terms:
+        lines.append('')
+        lines.append(t(lang, 'catalog_item_term_empty'))
+    else:
+        lines.append('')
+        for term in terms:
+            labels = term.get('labels', {}) or {}
+            label = labels.get(lang) or labels.get('en') or term['code']
+            lines.append(f"<b>{term['code']}</b> — {html.escape(label)}")
+    markup = InlineKeyboardMarkup(row_width=2)
+    if terms:
+        for term in terms:
+            markup.insert(
+                InlineKeyboardButton(term['code'], callback_data=f'item_term_select_{term["code"]}')
+            )
+    markup.add(InlineKeyboardButton(t(lang, 'catalog_item_term_refresh'), callback_data='item_term_refresh'))
+    markup.add(InlineKeyboardButton(t(lang, 'catalog_item_term_manage'), callback_data='tools_progress_terms'))
+    await safe_edit_message_text(
+        bot,
+        '\n'.join(lines),
+        chat_id=chat_id,
+        message_id=message_id,
+        reply_markup=markup,
+        parse_mode='HTML',
+    )
+
+
+async def item_term_refresh_handler(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    if TgConfig.STATE.get(user_id) != 'create_item_term':
+        await call.answer()
+        return
+    lang = _get_lang(user_id)
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', call.message.message_id)
+    await call.answer()
+    await _prompt_item_term(bot, call.message.chat.id, message_id, user_id, lang)
+
+
+async def item_term_select_handler(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    if TgConfig.STATE.get(user_id) != 'create_item_term':
+        await call.answer()
+        return
+    term_code = call.data[len('item_term_select_'):]
+    TgConfig.STATE[f'{user_id}_item_term'] = term_code
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', call.message.message_id)
+    await call.answer(t(_get_lang(user_id), 'settings_saved'))
+    await _finalize_item_creation(bot, call.message.chat.id, message_id, user_id)
+
+
+async def item_term_prompt_handler(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    if TgConfig.STATE.get(user_id) != 'create_item_term':
+        TgConfig.STATE.pop(f'{user_id}_terms_back', None)
+        await call.answer()
+        dispatcher = Dispatcher.get_current()
+        call.data = 'tools_cat_progress'
+        await dispatcher.callback_query_handlers.notify(call)
+        return
+    lang = _get_lang(user_id)
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', call.message.message_id)
+    TgConfig.STATE[f'{user_id}_terms_back'] = 'item_term_prompt'
+    await call.answer()
+    await _prompt_item_term(bot, call.message.chat.id, message_id, user_id, lang)
 
 
 async def _finalize_item_creation(bot, chat_id: int, message_id: int, user_id: int) -> None:
@@ -2198,6 +2302,18 @@ async def _finalize_item_creation(bot, chat_id: int, message_id: int, user_id: i
     description = TgConfig.STATE.get(f'{user_id}_description', '')
     price = TgConfig.STATE.get(f'{user_id}_price')
     preview_src = TgConfig.STATE.get(f'{user_id}_preview_path')
+    term_code = TgConfig.STATE.get(f'{user_id}_item_term')
+    if not term_code:
+        lang = _get_lang(user_id)
+        await _prompt_item_term(
+            bot,
+            chat_id,
+            message_id,
+            user_id,
+            lang,
+            notice=t(lang, 'catalog_item_term_required'),
+        )
+        return
     admin_info = await bot.get_chat(user_id)
     created: list[tuple[str, Tuple[str, ...]]] = []
     for category in destinations:
@@ -2212,7 +2328,7 @@ async def _finalize_item_creation(bot, chat_id: int, message_id: int, user_id: i
                 preview_src,
                 os.path.join(preview_folder, os.path.basename(preview_src)),
             )
-        create_item(internal_name, description, price, category[-1], None)
+        create_item(internal_name, description, price, category[-1], None, term_code)
         created.append((internal_name, category))
         logger.info(
             "User %s (%s) created new item \"%s\" in category \"%s\"",
@@ -3111,6 +3227,477 @@ async def emoji_override_reset_all(call: CallbackQuery):
     await _show_emoji_editor(bot, call.message.chat.id, message_id, lang, user_id=user_id, notice=t(lang, 'catalog_emojis_reset'))
 
 
+def _ordered_level_languages(names: dict[str, list[str]]) -> list[str]:
+    languages: list[str] = []
+    for code in _LEVEL_LANGUAGE_ORDER:
+        if code in names and code not in languages:
+            languages.append(code)
+    for code in sorted(names.keys()):
+        if code not in languages:
+            languages.append(code)
+    return languages
+
+
+def _level_language_label(interface_lang: str, code: str) -> str:
+    key = _LEVEL_LANGUAGE_KEY_BY_CODE.get(code)
+    if key:
+        return t(interface_lang, key)
+    return code.upper()
+
+
+def _parse_threshold_input(text: str) -> list[int]:
+    numbers = [int(token) for token in re.findall(r'\d+', text)]
+    return numbers
+
+
+def _parse_level_names(text: str) -> list[str]:
+    parts = [segment.strip() for segment in re.split(r'[\n;]+', text) if segment.strip()]
+    return parts
+
+
+async def _show_levels_overview(
+    bot,
+    chat_id: int,
+    message_id: int,
+    lang: str,
+    *,
+    user_id: int | None = None,
+    notice: str | None = None,
+) -> None:
+    thresholds, names_map, rewards = get_level_settings()
+    languages = _ordered_level_languages(names_map)
+    lines: list[str] = [t(lang, 'catalog_levels_title')]
+    if notice:
+        lines.append(notice)
+    lines.append(t(lang, 'catalog_levels_description'))
+    lines.append('')
+    lines.append(t(lang, 'catalog_levels_overview_header'))
+    for index, threshold in enumerate(thresholds):
+        lines.append(t(lang, 'catalog_levels_overview_entry', index=index + 1, threshold=threshold))
+        reward_value = rewards[index] if index < len(rewards) else 0
+        if reward_value:
+            lines.append(t(lang, 'catalog_levels_overview_reward', reward=reward_value))
+        for code in languages:
+            names = names_map.get(code, [])
+            if index >= len(names):
+                continue
+            label = _level_language_label(lang, code)
+            lines.append(t(lang, 'catalog_levels_overview_name', language=label, name=names[index]))
+        if index != len(thresholds) - 1:
+            lines.append('')
+    text = '\n'.join(lines)
+    markup = _levels_main_markup(lang)
+    if user_id is not None:
+        TgConfig.STATE[f'{user_id}_message_id'] = message_id
+    await safe_edit_message_text(
+        bot,
+        text,
+        chat_id=chat_id,
+        message_id=message_id,
+        reply_markup=markup,
+    )
+
+
+def _levels_main_markup(lang: str) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.insert(InlineKeyboardButton(t(lang, 'catalog_levels_action_thresholds'), callback_data='levels_edit_thresholds'))
+    markup.insert(InlineKeyboardButton(t(lang, 'catalog_levels_action_names'), callback_data='levels_edit_names'))
+    markup.insert(InlineKeyboardButton(t(lang, 'catalog_levels_action_rewards'), callback_data='levels_edit_rewards'))
+    markup.insert(InlineKeyboardButton(t(lang, 'catalog_levels_action_users'), callback_data='levels_view_users_0'))
+    markup.insert(InlineKeyboardButton(t(lang, 'catalog_levels_action_reset'), callback_data='levels_reset_prompt'))
+    markup.add(InlineKeyboardButton(t(lang, 'back'), callback_data=_navback('catalog_editor')))
+    return markup
+
+
+async def catalog_edit_levels_start(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = _get_lang(user_id)
+    if not (role & Permission.SHOP_MANAGE):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    TgConfig.STATE[user_id] = None
+    message_id = call.message.message_id
+    TgConfig.STATE[f'{user_id}_message_id'] = message_id
+    await call.answer()
+    await _show_levels_overview(bot, call.message.chat.id, message_id, lang, user_id=user_id)
+
+
+async def catalog_levels_edit_thresholds(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = _get_lang(user_id)
+    if not (role & Permission.SHOP_MANAGE):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    TgConfig.STATE[user_id] = 'levels_edit_thresholds'
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', call.message.message_id)
+    TgConfig.STATE[f'{user_id}_message_id'] = message_id
+    prompt = t(lang, 'catalog_levels_thresholds_prompt')
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(t(lang, 'back'), callback_data=_navback('catalog_levels')))
+    await call.answer()
+    await safe_edit_message_text(
+        bot,
+        prompt,
+        chat_id=call.message.chat.id,
+        message_id=message_id,
+        reply_markup=markup,
+    )
+
+
+async def process_levels_thresholds_input(message: Message):
+    bot, user_id = await get_bot_user_ids(message)
+    if TgConfig.STATE.get(user_id) != 'levels_edit_thresholds':
+        return
+    lang = _get_lang(user_id)
+    numbers = _parse_threshold_input(message.text or '')
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', message.message_id)
+    await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+    if not numbers:
+        error_text = t(lang, 'catalog_levels_thresholds_invalid')
+        prompt = t(lang, 'catalog_levels_thresholds_prompt')
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(t(lang, 'back'), callback_data=_navback('catalog_levels')))
+        await safe_edit_message_text(
+            bot,
+            f"{error_text}\n\n{prompt}",
+            chat_id=message.chat.id,
+            message_id=message_id,
+            reply_markup=markup,
+        )
+        return
+    set_level_thresholds(numbers)
+    TgConfig.STATE[user_id] = None
+    await _show_levels_overview(
+        bot,
+        message.chat.id,
+        message_id,
+        lang,
+        user_id=user_id,
+        notice=t(lang, 'catalog_levels_thresholds_updated'),
+    )
+
+
+async def catalog_levels_edit_rewards(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = _get_lang(user_id)
+    if not (role & Permission.SHOP_MANAGE):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    thresholds, _, rewards = get_level_settings()
+    TgConfig.STATE[user_id] = 'levels_edit_rewards'
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', call.message.message_id)
+    TgConfig.STATE[f'{user_id}_message_id'] = message_id
+    lines = [f"{idx + 1}. {reward}%" for idx, reward in enumerate(rewards)]
+    current = '\n'.join(lines) if lines else t(lang, 'catalog_levels_rewards_none')
+    prompt = t(lang, 'catalog_levels_rewards_prompt', current=current)
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(t(lang, 'back'), callback_data=_navback('catalog_levels')))
+    await call.answer()
+    await safe_edit_message_text(
+        bot,
+        prompt,
+        chat_id=call.message.chat.id,
+        message_id=message_id,
+        reply_markup=markup,
+        parse_mode='HTML',
+    )
+
+
+async def process_levels_rewards_input(message: Message):
+    bot, user_id = await get_bot_user_ids(message)
+    if TgConfig.STATE.get(user_id) != 'levels_edit_rewards':
+        return
+    lang = _get_lang(user_id)
+    numbers = _parse_threshold_input(message.text or '')
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', message.message_id)
+    await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+    if not numbers:
+        error_text = t(lang, 'catalog_levels_rewards_invalid')
+        current_state = get_level_settings()[2]
+        lines = [f"{idx + 1}. {reward}%" for idx, reward in enumerate(current_state)]
+        prompt = t(lang, 'catalog_levels_rewards_prompt', current='\n'.join(lines))
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(t(lang, 'back'), callback_data=_navback('catalog_levels')))
+        await safe_edit_message_text(
+            bot,
+            f"{error_text}\n\n{prompt}",
+            chat_id=message.chat.id,
+            message_id=message_id,
+            reply_markup=markup,
+            parse_mode='HTML',
+        )
+        return
+    set_level_rewards(numbers)
+    TgConfig.STATE[user_id] = None
+    await _show_levels_overview(
+        bot,
+        message.chat.id,
+        message_id,
+        lang,
+        user_id=user_id,
+        notice=t(lang, 'catalog_levels_rewards_updated'),
+    )
+
+
+async def catalog_levels_edit_names(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = _get_lang(user_id)
+    if not (role & Permission.SHOP_MANAGE):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    thresholds, names_map, _ = get_level_settings()
+    if not thresholds:
+        thresholds = [0]
+    TgConfig.STATE[user_id] = None
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', call.message.message_id)
+    TgConfig.STATE[f'{user_id}_message_id'] = message_id
+    markup = InlineKeyboardMarkup(row_width=1)
+    for code in _ordered_level_languages(names_map):
+        markup.add(
+            InlineKeyboardButton(
+                _level_language_label(lang, code),
+                callback_data=f'levels_names_lang_{code}',
+            )
+        )
+    markup.add(InlineKeyboardButton(t(lang, 'back'), callback_data=_navback('catalog_levels')))
+    await call.answer()
+    await safe_edit_message_text(
+        bot,
+        t(lang, 'catalog_levels_names_choose_language'),
+        chat_id=call.message.chat.id,
+        message_id=message_id,
+        reply_markup=markup,
+    )
+
+
+async def _show_levels_name_prompt(
+    bot,
+    chat_id: int,
+    message_id: int,
+    lang: str,
+    user_id: int,
+    language: str,
+    notice: str | None = None,
+) -> None:
+    thresholds, names_map, _ = get_level_settings()
+    names = names_map.get(language, [])
+    lines = [f"{idx + 1}. {html.escape(name)}" for idx, name in enumerate(names)]
+    current = '\n'.join(lines)
+    prompt = t(
+        lang,
+        'catalog_levels_names_prompt',
+        count=len(thresholds),
+        language=_level_language_label(lang, language),
+        current=current,
+    )
+    text = f"{notice}\n\n{prompt}" if notice else prompt
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(t(lang, 'back'), callback_data=_navback('catalog_levels')))
+    TgConfig.STATE[user_id] = 'levels_edit_names'
+    TgConfig.STATE[f'{user_id}_levels_language'] = language
+    TgConfig.STATE[f'{user_id}_message_id'] = message_id
+    await safe_edit_message_text(
+        bot,
+        text,
+        chat_id=chat_id,
+        message_id=message_id,
+        reply_markup=markup,
+        parse_mode='HTML',
+    )
+
+
+async def catalog_levels_select_language(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = _get_lang(user_id)
+    if not (role & Permission.SHOP_MANAGE):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    language = call.data[len('levels_names_lang_'):]
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', call.message.message_id)
+    await call.answer()
+    await _show_levels_name_prompt(bot, call.message.chat.id, message_id, lang, user_id, language)
+
+
+async def process_levels_names_input(message: Message):
+    bot, user_id = await get_bot_user_ids(message)
+    if TgConfig.STATE.get(user_id) != 'levels_edit_names':
+        return
+    lang = _get_lang(user_id)
+    language = TgConfig.STATE.get(f'{user_id}_levels_language')
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', message.message_id)
+    await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+    if not language:
+        TgConfig.STATE[user_id] = None
+        await _show_levels_overview(bot, message.chat.id, message_id, lang, user_id=user_id)
+        return
+    names = _parse_level_names(message.text or '')
+    if not names:
+        await _show_levels_name_prompt(
+            bot,
+            message.chat.id,
+            message_id,
+            lang,
+            user_id,
+            language,
+            notice=t(lang, 'catalog_levels_names_invalid'),
+        )
+        return
+    final_names = set_level_names(language, names)
+    TgConfig.STATE[user_id] = None
+    TgConfig.STATE.pop(f'{user_id}_levels_language', None)
+    notice = t(
+        lang,
+        'catalog_levels_names_updated',
+        language=_level_language_label(lang, language),
+    )
+    await _show_levels_overview(bot, message.chat.id, message_id, lang, user_id=user_id, notice=notice)
+
+
+def _level_index_for_purchases(thresholds: list[int], purchases: int) -> int:
+    level_index = 0
+    for idx, threshold in enumerate(thresholds):
+        if purchases >= threshold:
+            level_index = idx
+        else:
+            break
+    return level_index
+
+
+async def _show_level_users(
+    bot,
+    chat_id: int,
+    message_id: int,
+    lang: str,
+    user_id: int,
+    page: int = 0,
+) -> None:
+    thresholds, _, _ = get_level_settings()
+    total_users = get_user_count()
+    total_pages = max(1, math.ceil(total_users / _LEVELS_PAGE_SIZE)) if total_users else 1
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+    offset = page * _LEVELS_PAGE_SIZE
+    entries = get_user_level_stats(offset=offset, limit=_LEVELS_PAGE_SIZE)
+    lines = [t(lang, 'catalog_levels_users_title', page=page + 1, total=total_pages)]
+    if not entries:
+        lines.append(t(lang, 'catalog_levels_users_empty'))
+    for idx, entry in enumerate(entries):
+        user_display = f"@{entry['username']}" if entry['username'] else str(entry['user_id'])
+        level_name, _, battery = get_level_info(entry['purchases'], entry['language'])
+        level_display = f"{battery} {level_name}".strip()
+        purchases_text = t(lang, 'catalog_levels_users_purchases', count=entry['purchases'])
+        level_idx = _level_index_for_purchases(thresholds, entry['purchases'])
+        if level_idx < len(thresholds) - 1:
+            next_threshold = thresholds[level_idx + 1]
+            progress_text = t(lang, 'catalog_levels_users_progress', next=next_threshold)
+        else:
+            progress_text = t(lang, 'catalog_levels_users_max')
+        lines.append(
+            t(
+                lang,
+                'catalog_levels_users_line',
+                index=offset + idx + 1,
+                user=user_display,
+                level=level_display,
+                purchases=purchases_text,
+                progress=progress_text,
+            )
+        )
+    text = '\n\n'.join(lines)
+    markup = InlineKeyboardMarkup(row_width=3)
+    if total_pages > 1:
+        buttons: list[InlineKeyboardButton] = []
+        if page > 0:
+            buttons.append(InlineKeyboardButton('⬅️', callback_data=f'levels_view_users_{page - 1}'))
+        buttons.append(InlineKeyboardButton(f'{page + 1}/{total_pages}', callback_data='levels_view_users_page'))
+        if page + 1 < total_pages:
+            buttons.append(InlineKeyboardButton('➡️', callback_data=f'levels_view_users_{page + 1}'))
+        markup.row(*buttons)
+    markup.add(InlineKeyboardButton(t(lang, 'back'), callback_data=_navback('catalog_levels')))
+    TgConfig.STATE[f'{user_id}_message_id'] = message_id
+    await safe_edit_message_text(
+        bot,
+        text,
+        chat_id=chat_id,
+        message_id=message_id,
+        reply_markup=markup,
+    )
+
+
+async def catalog_levels_view_users(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = _get_lang(user_id)
+    if not (role & Permission.SHOP_MANAGE):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    payload = call.data[len('levels_view_users_'):] if call.data.startswith('levels_view_users_') else '0'
+    try:
+        page = int(payload)
+    except ValueError:
+        page = 0
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', call.message.message_id)
+    TgConfig.STATE[user_id] = None
+    await call.answer()
+    await _show_level_users(bot, call.message.chat.id, message_id, lang, user_id, page=page)
+
+
+async def catalog_levels_view_users_placeholder(call: CallbackQuery):
+    await call.answer()
+
+
+async def catalog_levels_reset_prompt(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = _get_lang(user_id)
+    if not (role & Permission.SHOP_MANAGE):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', call.message.message_id)
+    TgConfig.STATE[f'{user_id}_message_id'] = message_id
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.row(
+        InlineKeyboardButton(t(lang, 'confirm'), callback_data='levels_reset_confirm'),
+        InlineKeyboardButton(t(lang, 'action_cancel'), callback_data=_navback('catalog_levels')),
+    )
+    await call.answer()
+    await safe_edit_message_text(
+        bot,
+        t(lang, 'catalog_levels_reset_prompt'),
+        chat_id=call.message.chat.id,
+        message_id=message_id,
+        reply_markup=markup,
+    )
+
+
+async def catalog_levels_reset_confirm(call: CallbackQuery):
+    bot, user_id = await get_bot_user_ids(call)
+    role = check_role(user_id)
+    lang = _get_lang(user_id)
+    if not (role & Permission.SHOP_MANAGE):
+        await call.answer(t(lang, 'insufficient_rights'))
+        return
+    message_id = TgConfig.STATE.get(f'{user_id}_message_id', call.message.message_id)
+    reset_level_settings()
+    TgConfig.STATE[user_id] = None
+    await call.answer()
+    await _show_levels_overview(
+        bot,
+        call.message.chat.id,
+        message_id,
+        lang,
+        user_id=user_id,
+        notice=t(lang, 'catalog_levels_reset_done'),
+    )
+
+
 async def catalog_edit_main_start(call: CallbackQuery):
     bot, user_id = await get_bot_user_ids(call)
     role = check_role(user_id)
@@ -3895,6 +4482,12 @@ def register_shop_management(dp: Dispatcher) -> None:
                                        lambda c: c.data == 'item-management')
     dp.register_callback_query_handler(add_item_callback_handler,
                                        lambda c: c.data == 'add_item')
+    dp.register_callback_query_handler(item_term_refresh_handler,
+                                       lambda c: c.data == 'item_term_refresh')
+    dp.register_callback_query_handler(item_term_select_handler,
+                                       lambda c: c.data.startswith('item_term_select_'))
+    dp.register_callback_query_handler(item_term_prompt_handler,
+                                       lambda c: c.data == 'item_term_prompt')
     dp.register_callback_query_handler(update_item_amount_callback_handler,
                                        lambda c: c.data == 'update_item_amount')
     dp.register_callback_query_handler(update_item_callback_handler,
@@ -3979,6 +4572,24 @@ def register_shop_management(dp: Dispatcher) -> None:
                                        lambda c: c.data == 'catalog_edit_category')
     dp.register_callback_query_handler(catalog_edit_item_start,
                                        lambda c: c.data == 'catalog_edit_item')
+    dp.register_callback_query_handler(catalog_edit_levels_start,
+                                       lambda c: c.data in {'catalog_edit_levels', 'catalog_levels'})
+    dp.register_callback_query_handler(catalog_levels_edit_thresholds,
+                                       lambda c: c.data == 'levels_edit_thresholds')
+    dp.register_callback_query_handler(catalog_levels_edit_rewards,
+                                       lambda c: c.data == 'levels_edit_rewards')
+    dp.register_callback_query_handler(catalog_levels_edit_names,
+                                       lambda c: c.data == 'levels_edit_names')
+    dp.register_callback_query_handler(catalog_levels_select_language,
+                                       lambda c: c.data.startswith('levels_names_lang_'))
+    dp.register_callback_query_handler(catalog_levels_view_users,
+                                       lambda c: c.data.startswith('levels_view_users_') and c.data[len('levels_view_users_'):].lstrip('-').isdigit())
+    dp.register_callback_query_handler(catalog_levels_view_users_placeholder,
+                                       lambda c: c.data == 'levels_view_users_page')
+    dp.register_callback_query_handler(catalog_levels_reset_prompt,
+                                       lambda c: c.data == 'levels_reset_prompt')
+    dp.register_callback_query_handler(catalog_levels_reset_confirm,
+                                       lambda c: c.data == 'levels_reset_confirm')
     dp.register_callback_query_handler(catalog_edit_buttons_start,
                                        lambda c: c.data == 'catalog_edit_buttons')
     dp.register_callback_query_handler(catalog_edit_buttons_select,
@@ -4109,6 +4720,15 @@ def register_shop_management(dp: Dispatcher) -> None:
     dp.register_callback_query_handler(add_preview_no,
                                        lambda c: c.data == 'add_preview_no' and TgConfig.STATE.get(c.from_user.id) == 'create_item_preview')
 
+    dp.register_message_handler(process_levels_thresholds_input,
+                                lambda c: TgConfig.STATE.get(c.from_user.id) == 'levels_edit_thresholds',
+                                content_types=['text'])
+    dp.register_message_handler(process_levels_rewards_input,
+                                lambda c: TgConfig.STATE.get(c.from_user.id) == 'levels_edit_rewards',
+                                content_types=['text'])
+    dp.register_message_handler(process_levels_names_input,
+                                lambda c: TgConfig.STATE.get(c.from_user.id) == 'levels_edit_names',
+                                content_types=['text'])
     dp.register_message_handler(check_item_name_for_amount_upd,
                                 lambda c: TgConfig.STATE.get(c.from_user.id) == 'update_amount_of_item')
     dp.register_message_handler(updating_item_amount,
